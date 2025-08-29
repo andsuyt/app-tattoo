@@ -7,34 +7,35 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/locale/pt-br.js"></script>
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-        }
-    </style>
-</head>
-<body class="bg-stone-900 min-h-screen text-gray-300 font-sans">
-    <div id="app-container"></div>
-    <div id="notification" class="p-4 m-4 rounded-xl shadow-lg fixed bottom-4 right-4 z-50 text-white transition-opacity duration-300 opacity-0 invisible">
-        <span id="notification-message"></span>
-    </div>
-    
-    <script>
-        // Use localStorage para simular o banco de dados.
-        // Isso permite que o app funcione offline em qualquer navegador/leitor de HTML.
-        const STORAGE_KEY_APPOINTMENTS = 'tattoo_appointments';
-        const STORAGE_KEY_CLIENTS = 'tattoo_clients';
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Ativar logs do Firebase para depuração
+        setLogLevel('Debug');
+
+        // Variáveis globais
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId;
 
         const appState = {
-            currentView: 'agenda',
+            currentView: 'auth',
             currentDate: dayjs(),
             selectedDate: dayjs(),
-            clients: JSON.parse(localStorage.getItem(STORAGE_KEY_CLIENTS) || '[]'),
-            appointments: JSON.parse(localStorage.getItem(STORAGE_KEY_APPOINTMENTS) || '[]'),
+            clients: [],
+            appointments: [],
             isClientFormVisible: false,
             isAppointmentModalVisible: false,
             editingAppointment: null,
             editingClient: null,
+            isLoaded: false
         };
 
         dayjs.locale('pt-br');
@@ -45,6 +46,20 @@
             "Mão", "Pé", "Pescoço", "Outra"
         ];
         
+        // Inicializar Firebase
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            if (initialAuthToken) {
+                signInWithCustomToken(auth, initialAuthToken).catch(console.error);
+            } else {
+                signInAnonymously(auth).catch(console.error);
+            }
+        } catch (error) {
+            console.error("Erro ao inicializar o Firebase:", error);
+        }
+
         // Funções utilitárias
         function showNotification(message, type = 'success') {
             const notification = document.getElementById('notification');
@@ -72,68 +87,85 @@
             });
         }
 
-        // Funções para salvar dados no localStorage
-        function saveClients(clients) {
-            localStorage.setItem(STORAGE_KEY_CLIENTS, JSON.stringify(clients));
-            appState.clients = clients;
+        // Funções do Firebase
+        async function fetchAppointments() {
+            if (!userId) { console.warn("ID do usuário não disponível. Pulando a busca."); return; }
+            const q = collection(db, `artifacts/${appId}/users/${userId}/appointments`);
+            onSnapshot(q, (snapshot) => {
+                const appointments = [];
+                snapshot.forEach(doc => appointments.push({ id: doc.id, ...doc.data() }));
+                appState.appointments = appointments;
+                render();
+            });
         }
 
-        function saveAppointments(appointments) {
-            localStorage.setItem(STORAGE_KEY_APPOINTMENTS, JSON.stringify(appointments));
-            appState.appointments = appointments;
+        async function fetchClients() {
+            if (!userId) { console.warn("ID do usuário não disponível. Pulando a busca."); return; }
+            const q = collection(db, `artifacts/${appId}/users/${userId}/clients`);
+            onSnapshot(q, (snapshot) => {
+                const clients = [];
+                snapshot.forEach(doc => clients.push({ id: doc.id, ...doc.data() }));
+                appState.clients = clients;
+                render();
+            });
         }
 
-        function generateUniqueId() {
-            return Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        }
-
-        // CRUD com localStorage
-        function saveClient(clientData) {
-            if (clientData.id) {
-                const index = appState.clients.findIndex(c => c.id === clientData.id);
-                if (index !== -1) {
-                    appState.clients[index] = { ...appState.clients[index], ...clientData };
+        async function saveClient(clientData) {
+            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            try {
+                if (clientData.id) {
+                    await updateDoc(doc(db, `artifacts/${appId}/users/${userId}/clients`, clientData.id), clientData);
+                    showNotification('Cliente atualizado com sucesso!');
+                } else {
+                    await addDoc(collection(db, `artifacts/${appId}/users/${userId}/clients`), clientData);
+                    showNotification('Cliente salvo com sucesso!');
                 }
-                showNotification('Cliente atualizado com sucesso!');
-            } else {
-                clientData.id = generateUniqueId();
-                appState.clients.push(clientData);
-                showNotification('Cliente salvo com sucesso!');
+            } catch (e) {
+                console.error("Erro ao salvar cliente: ", e);
+                showNotification('Erro ao salvar cliente.', 'error');
             }
-            saveClients(appState.clients);
-            render();
         }
 
-        function saveAppointment(appointmentData) {
-            if (appointmentData.id) {
-                const index = appState.appointments.findIndex(a => a.id === appointmentData.id);
-                if (index !== -1) {
-                    appState.appointments[index] = { ...appState.appointments[index], ...appointmentData };
+        async function saveAppointment(appointmentData) {
+            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            try {
+                if (appointmentData.id) {
+                    await updateDoc(doc(db, `artifacts/${appId}/users/${userId}/appointments`, appointmentData.id), appointmentData);
+                    showNotification('Agendamento atualizado com sucesso!');
+                } else {
+                    await addDoc(collection(db, `artifacts/${appId}/users/${userId}/appointments`), appointmentData);
+                    showNotification('Agendamento salvo com sucesso!');
                 }
-                showNotification('Agendamento atualizado com sucesso!');
-            } else {
-                appointmentData.id = generateUniqueId();
-                appState.appointments.push(appointmentData);
-                showNotification('Agendamento salvo com sucesso!');
+            } catch (e) {
+                console.error("Erro ao salvar agendamento: ", e);
+                showNotification('Erro ao salvar agendamento.', 'error');
             }
-            saveAppointments(appState.appointments);
-            render();
         }
 
-        function deleteAppointment(id) {
-            appState.appointments = appState.appointments.filter(a => a.id !== id);
-            saveAppointments(appState.appointments);
-            showNotification('Agendamento excluído com sucesso!');
-            render();
+        async function deleteAppointment(id) {
+            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            try {
+                await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/appointments`, id));
+                showNotification('Agendamento excluído com sucesso!');
+            } catch (e) {
+                console.error("Erro ao excluir agendamento: ", e);
+                showNotification('Erro ao excluir agendamento.', 'error');
+            }
         }
 
-        function deleteClient(id) {
-            appState.clients = appState.clients.filter(c => c.id !== id);
-            appState.appointments = appState.appointments.filter(a => a.clientId !== id);
-            saveClients(appState.clients);
-            saveAppointments(appState.appointments);
-            showNotification('Cliente e seus agendamentos foram excluídos com sucesso!');
-            render();
+        async function deleteClient(id) {
+            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            try {
+                const appointmentsQuery = query(collection(db, `artifacts/${appId}/users/${userId}/appointments`), where("clientId", "==", id));
+                const appointmentsSnapshot = await getDocs(appointmentsQuery);
+                const deletePromises = appointmentsSnapshot.docs.map(doc => deleteDoc(doc.ref));
+                await Promise.all(deletePromises);
+                await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/clients`, id));
+                showNotification('Cliente e seus agendamentos foram excluídos com sucesso!');
+            } catch (e) {
+                console.error("Erro ao excluir cliente:", e);
+                showNotification('Erro ao excluir cliente.', 'error');
+            }
         }
 
         // Funções de Renderização
@@ -141,41 +173,56 @@
             const appContainer = document.getElementById('app-container');
             if (!appContainer) return;
             appContainer.innerHTML = '';
-
-            const header = `
-                <div class="fixed top-0 left-0 w-full bg-stone-900 shadow-lg p-4 z-20 flex justify-between items-center text-white font-serif">
-                    <h1 class="text-2xl">Agenda de Tatuagem</h1>
-                    <span class="text-xs bg-stone-700 rounded-full px-2 py-1 truncate max-w-[50%]">Versão Local</span>
-                </div>
-            `;
             
-            const mainContent = document.createElement('div');
-            mainContent.className = 'pt-20 pb-20 p-4 min-h-screen bg-stone-900 text-gray-300 font-sans';
-
-            if (appState.currentView === 'agenda') {
-                mainContent.innerHTML = renderAgendaView();
-            } else if (appState.currentView === 'clients') {
-                mainContent.innerHTML = renderClientsView();
+            if (appState.currentView === 'auth') {
+                appContainer.innerHTML = renderAuthView();
+            } else {
+                appContainer.innerHTML = `
+                    <div class="fixed top-0 left-0 w-full bg-stone-900 shadow-lg p-4 z-20 flex justify-between items-center text-white font-serif">
+                        <h1 class="text-2xl">Agenda de Tatuagem</h1>
+                        <div class="flex items-center space-x-2">
+                             <button id="logout-btn" class="text-sm bg-red-600 rounded-full px-4 py-2 hover:bg-red-500 transition-colors">Sair</button>
+                        </div>
+                    </div>
+                    <div class="pt-20 pb-20 p-4 min-h-screen bg-stone-900 text-gray-300 font-sans">
+                        ${appState.currentView === 'agenda' ? renderAgendaView() : renderClientsView()}
+                    </div>
+                    <div class="fixed bottom-0 left-0 w-full bg-stone-900 shadow-lg p-4 z-20 font-serif">
+                        <div class="flex justify-around">
+                            <button id="tab-agenda" class="p-4 rounded-xl flex-1 mx-2 ${appState.currentView === 'agenda' ? 'bg-stone-700 text-amber-500' : 'text-gray-400 hover:bg-stone-800'} transition-colors">
+                                <span class="text-xl">📅</span><br>Agenda
+                            </button>
+                            <button id="tab-clients" class="p-4 rounded-xl flex-1 mx-2 ${appState.currentView === 'clients' ? 'bg-stone-700 text-amber-500' : 'text-gray-400 hover:bg-stone-800'} transition-colors">
+                                <span class="text-xl">👥</span><br>Clientes
+                            </button>
+                        </div>
+                    </div>
+                `;
             }
 
-            const footer = `
-                <div class="fixed bottom-0 left-0 w-full bg-stone-900 shadow-lg p-4 z-20 font-serif">
-                    <div class="flex justify-around">
-                        <button id="tab-agenda" class="p-4 rounded-xl flex-1 mx-2 ${appState.currentView === 'agenda' ? 'bg-stone-700 text-amber-500' : 'text-gray-400 hover:bg-stone-800'} transition-colors">
-                            <span class="text-xl">📅</span><br>Agenda
-                        </button>
-                        <button id="tab-clients" class="p-4 rounded-xl flex-1 mx-2 ${appState.currentView === 'clients' ? 'bg-stone-700 text-amber-500' : 'text-gray-400 hover:bg-stone-800'} transition-colors">
-                            <span class="text-xl">👥</span><br>Clientes
-                        </button>
+            attachEventListeners();
+        }
+
+        function renderAuthView() {
+            return `
+                <div class="flex min-h-screen items-center justify-center p-4 bg-stone-900 font-sans">
+                    <div class="bg-stone-800 p-8 rounded-xl shadow-2xl w-full max-w-sm text-gray-300 text-center">
+                        <h2 class="text-3xl font-serif text-white mb-6">Bem-vindo</h2>
+                        <form id="auth-form" class="space-y-4">
+                            <div>
+                                <input type="email" id="auth-email" required class="w-full p-3 bg-stone-700 rounded-lg text-white" placeholder="E-mail">
+                            </div>
+                            <div>
+                                <input type="password" id="auth-password" required class="w-full p-3 bg-stone-700 rounded-lg text-white" placeholder="Senha">
+                            </div>
+                            <div class="flex flex-col space-y-4">
+                                <button type="submit" id="login-btn" class="w-full p-3 rounded-lg bg-amber-500 text-stone-900 font-bold hover:bg-amber-400 transition-colors">Entrar</button>
+                                <button type="button" id="signup-btn" class="w-full p-3 rounded-lg bg-stone-700 text-white hover:bg-stone-600 transition-colors">Criar Conta</button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             `;
-
-            appContainer.innerHTML = header;
-            appContainer.appendChild(mainContent);
-            appContainer.innerHTML += footer;
-
-            attachEventListeners();
         }
 
         function renderAgendaView() {
@@ -189,9 +236,7 @@
             const dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 
             let calendarHTML = `<div class="grid grid-cols-7 text-center font-bold text-gray-400 mb-2">`;
-            dayNames.forEach(day => {
-                calendarHTML += `<div>${day}</div>`;
-            });
+            dayNames.forEach(day => calendarHTML += `<div>${day}</div>`);
             calendarHTML += `</div>`;
             
             calendarHTML += `<div class="grid grid-cols-7">`;
@@ -290,7 +335,6 @@
 
             return `
                 <div class="space-y-6">
-                    <!-- Calendar Header -->
                     <div class="flex justify-between items-center text-white p-2 bg-stone-800 rounded-xl shadow-lg font-serif">
                         <button id="prev-month" class="p-2 rounded-full hover:bg-stone-700 transition-colors">◀</button>
                         <h2 class="text-xl font-bold">${monthName}</h2>
@@ -370,128 +414,170 @@
         function attachEventListeners() {
             const appContainer = document.getElementById('app-container');
 
-            const tabAgenda = appContainer.querySelector('#tab-agenda');
-            if (tabAgenda) tabAgenda.addEventListener('click', () => { appState.currentView = 'agenda'; render(); });
-            const tabClients = appContainer.querySelector('#tab-clients');
-            if (tabClients) tabClients.addEventListener('click', () => { appState.currentView = 'clients'; render(); });
-            
-            if (appState.currentView === 'agenda') {
-                const calendarDays = appContainer.querySelectorAll('[data-day]');
-                calendarDays.forEach(dayBtn => {
-                    dayBtn.addEventListener('click', () => {
-                        appState.selectedDate = dayjs(dayBtn.dataset.day);
-                        render();
-                    });
-                });
-                
-                const prevMonthBtn = appContainer.querySelector('#prev-month');
-                if (prevMonthBtn) prevMonthBtn.addEventListener('click', () => { appState.currentDate = appState.currentDate.subtract(1, 'month'); render(); });
-                const nextMonthBtn = appContainer.querySelector('#next-month');
-                if (nextMonthBtn) nextMonthBtn.addEventListener('click', () => { appState.currentDate = appState.currentDate.add(1, 'month'); render(); });
-
-                const addAppointmentBtn = document.getElementById('add-appointment-btn');
-                if (addAppointmentBtn) {
-                    addAppointmentBtn.addEventListener('click', () => {
-                        appState.editingAppointment = null;
-                        appState.isAppointmentModalVisible = true;
-                        render();
-                        const dateInput = document.getElementById('appointment-date');
-                        if (dateInput) dateInput.value = appState.selectedDate.format('YYYY-MM-DD');
-                    });
-                }
-                
-                const appointmentForm = document.getElementById('appointment-form');
-                if (appointmentForm) {
-                    appointmentForm.addEventListener('submit', (e) => {
+            if (appState.currentView === 'auth') {
+                const authForm = document.getElementById('auth-form');
+                if (authForm) {
+                    authForm.addEventListener('submit', async (e) => {
                         e.preventDefault();
-                        const data = {
-                            clientId: document.getElementById('appointment-client').value,
-                            date: dayjs(`${document.getElementById('appointment-date').value}T${document.getElementById('appointment-time').value}`).toISOString(),
-                            bodyPart: document.getElementById('appointment-body-part').value,
-                            depositPaid: document.getElementById('appointment-deposit-paid').checked,
-                            referenceImage: document.getElementById('appointment-image').value
-                        };
-                        if (appState.editingAppointment) data.id = appState.editingAppointment.id;
-                        saveAppointment(data);
-                        appState.isAppointmentModalVisible = false;
-                        render();
-                    });
-                }
-                
-                const closeAppointmentModal = document.getElementById('close-appointment-modal');
-                if (closeAppointmentModal) closeAppointmentModal.addEventListener('click', () => { appState.isAppointmentModalVisible = false; render(); });
-
-                document.querySelectorAll('[data-delete-appointment]').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const id = e.currentTarget.dataset.deleteAppointment;
-                        if (confirm('Tem certeza que deseja excluir este agendamento?')) deleteAppointment(id);
-                    });
-                });
-                
-                document.querySelectorAll('[data-edit-appointment]').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const id = e.currentTarget.dataset.editAppointment;
-                        appState.editingAppointment = appState.appointments.find(a => a.id === id);
-                        appState.isAppointmentModalVisible = true;
-                        render();
-                        const form = document.getElementById('appointment-form');
-                        if (form && appState.editingAppointment) {
-                            form.querySelector('#appointment-client').value = appState.editingAppointment.clientId;
-                            form.querySelector('#appointment-date').value = dayjs(appState.editingAppointment.date).format('YYYY-MM-DD');
-                            form.querySelector('#appointment-time').value = dayjs(appState.editingAppointment.date).format('HH:mm');
-                            form.querySelector('#appointment-body-part').value = appState.editingAppointment.bodyPart;
-                            form.querySelector('#appointment-deposit-paid').checked = appState.editingAppointment.depositPaid;
-                            form.querySelector('#appointment-image').value = appState.editingAppointment.referenceImage;
+                        const email = document.getElementById('auth-email').value;
+                        const password = document.getElementById('auth-password').value;
+                        try {
+                            await signInWithEmailAndPassword(auth, email, password);
+                        } catch (error) {
+                            if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+                                showNotification('E-mail ou senha inválidos.', 'error');
+                            } else {
+                                showNotification(`Erro ao fazer login: ${error.message}`, 'error');
+                            }
                         }
                     });
-                });
 
-            } else if (appState.currentView === 'clients') {
-                const addClientBtn = document.getElementById('add-client-btn');
-                if (addClientBtn) addClientBtn.addEventListener('click', () => { appState.editingClient = null; appState.isClientFormVisible = true; render(); });
+                    const signupBtn = document.getElementById('signup-btn');
+                    if (signupBtn) {
+                        signupBtn.addEventListener('click', async () => {
+                            const email = document.getElementById('auth-email').value;
+                            const password = document.getElementById('auth-password').value;
+                            if (password.length < 6) {
+                                return showNotification('A senha deve ter pelo menos 6 caracteres.', 'error');
+                            }
+                            try {
+                                await createUserWithEmailAndPassword(auth, email, password);
+                                showNotification('Conta criada com sucesso! Faça o login.');
+                            } catch (error) {
+                                if (error.code === 'auth/email-already-in-use') {
+                                    showNotification('Este e-mail já está em uso.', 'error');
+                                } else {
+                                    showNotification(`Erro ao criar conta: ${error.message}`, 'error');
+                                }
+                            }
+                        });
+                    }
+                }
+            } else {
+                const logoutBtn = appContainer.querySelector('#logout-btn');
+                if (logoutBtn) logoutBtn.addEventListener('click', () => signOut(auth));
                 
-                const clientForm = document.getElementById('client-form');
-                if (clientForm) {
-                    clientForm.addEventListener('submit', (e) => {
-                        e.preventDefault();
-                        const data = {
-                            name: document.getElementById('client-name').value,
-                            contact: document.getElementById('client-contact').value,
-                            totalValue: document.getElementById('client-value').value
-                        };
-                        if (appState.editingClient) data.id = appState.editingClient.id;
-                        saveClient(data);
-                        appState.isClientFormVisible = false;
-                        render();
+                const tabAgenda = appContainer.querySelector('#tab-agenda');
+                if (tabAgenda) tabAgenda.addEventListener('click', () => { appState.currentView = 'agenda'; render(); });
+                const tabClients = appContainer.querySelector('#tab-clients');
+                if (tabClients) tabClients.addEventListener('click', () => { appState.currentView = 'clients'; render(); });
+                
+                if (appState.currentView === 'agenda') {
+                    const calendarDays = appContainer.querySelectorAll('[data-day]');
+                    calendarDays.forEach(dayBtn => dayBtn.addEventListener('click', () => { appState.selectedDate = dayjs(dayBtn.dataset.day); render(); }));
+                    
+                    const prevMonthBtn = appContainer.querySelector('#prev-month');
+                    if (prevMonthBtn) prevMonthBtn.addEventListener('click', () => { appState.currentDate = appState.currentDate.subtract(1, 'month'); render(); });
+                    const nextMonthBtn = appContainer.querySelector('#next-month');
+                    if (nextMonthBtn) nextMonthBtn.addEventListener('click', () => { appState.currentDate = appState.currentDate.add(1, 'month'); render(); });
+
+                    const addAppointmentBtn = document.getElementById('add-appointment-btn');
+                    if (addAppointmentBtn) {
+                        addAppointmentBtn.addEventListener('click', () => {
+                            appState.editingAppointment = null;
+                            appState.isAppointmentModalVisible = true;
+                            render();
+                            const dateInput = document.getElementById('appointment-date');
+                            if (dateInput) dateInput.value = appState.selectedDate.format('YYYY-MM-DD');
+                        });
+                    }
+                    
+                    const appointmentForm = document.getElementById('appointment-form');
+                    if (appointmentForm) {
+                        appointmentForm.addEventListener('submit', (e) => {
+                            e.preventDefault();
+                            const data = {
+                                clientId: document.getElementById('appointment-client').value,
+                                date: dayjs(`${document.getElementById('appointment-date').value}T${document.getElementById('appointment-time').value}`).toISOString(),
+                                bodyPart: document.getElementById('appointment-body-part').value,
+                                depositPaid: document.getElementById('appointment-deposit-paid').checked,
+                                referenceImage: document.getElementById('appointment-image').value
+                            };
+                            if (appState.editingAppointment) data.id = appState.editingAppointment.id;
+                            saveAppointment(data);
+                            appState.isAppointmentModalVisible = false;
+                            render();
+                        });
+                    }
+                    
+                    const closeAppointmentModal = document.getElementById('close-appointment-modal');
+                    if (closeAppointmentModal) closeAppointmentModal.addEventListener('click', () => { appState.isAppointmentModalVisible = false; render(); });
+                    
+                    document.querySelectorAll('[data-delete-appointment]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteAppointment(e.currentTarget.dataset.deleteAppointment); }));
+                    document.querySelectorAll('[data-edit-appointment]').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            appState.editingAppointment = appState.appointments.find(a => a.id === e.currentTarget.dataset.editAppointment);
+                            appState.isAppointmentModalVisible = true;
+                            render();
+                            const form = document.getElementById('appointment-form');
+                            if (form && appState.editingAppointment) {
+                                form.querySelector('#appointment-client').value = appState.editingAppointment.clientId;
+                                form.querySelector('#appointment-date').value = dayjs(appState.editingAppointment.date).format('YYYY-MM-DD');
+                                form.querySelector('#appointment-time').value = dayjs(appState.editingAppointment.date).format('HH:mm');
+                                form.querySelector('#appointment-body-part').value = appState.editingAppointment.bodyPart;
+                                form.querySelector('#appointment-deposit-paid').checked = appState.editingAppointment.depositPaid;
+                                form.querySelector('#appointment-image').value = appState.editingAppointment.referenceImage;
+                            }
+                        });
+                    });
+
+                } else if (appState.currentView === 'clients') {
+                    const addClientBtn = document.getElementById('add-client-btn');
+                    if (addClientBtn) addClientBtn.addEventListener('click', () => { appState.editingClient = null; appState.isClientFormVisible = true; render(); });
+                    
+                    const clientForm = document.getElementById('client-form');
+                    if (clientForm) {
+                        clientForm.addEventListener('submit', (e) => {
+                            e.preventDefault();
+                            const data = {
+                                name: document.getElementById('client-name').value,
+                                contact: document.getElementById('client-contact').value,
+                                totalValue: document.getElementById('client-value').value
+                            };
+                            if (appState.editingClient) data.id = appState.editingClient.id;
+                            saveClient(data);
+                            appState.isClientFormVisible = false;
+                            render();
+                        });
+                    }
+                    
+                    const closeClientModal = document.getElementById('close-client-modal');
+                    if (closeClientModal) closeClientModal.addEventListener('click', () => { appState.isClientFormVisible = false; render(); });
+                    
+                    document.querySelectorAll('[data-delete-client]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteClient(e.currentTarget.dataset.deleteClient); }));
+                    document.querySelectorAll('[data-edit-client]').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            appState.editingClient = appState.clients.find(c => c.id === e.currentTarget.dataset.editClient);
+                            appState.isClientFormVisible = true;
+                            render();
+                            const form = document.getElementById('client-form');
+                            if (form && appState.editingClient) {
+                                form.querySelector('#client-name').value = appState.editingClient.name;
+                                form.querySelector('#client-contact').value = appState.editingClient.contact;
+                                form.querySelector('#client-value').value = appState.editingClient.totalValue;
+                            }
+                        });
                     });
                 }
-                
-                const closeClientModal = document.getElementById('close-client-modal');
-                if (closeClientModal) closeClientModal.addEventListener('click', () => { appState.isClientFormVisible = false; render(); });
-                
-                document.querySelectorAll('[data-delete-client]').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const id = e.currentTarget.dataset.deleteClient;
-                        if (confirm('Tem certeza que deseja excluir este cliente e todos os seus agendamentos?')) deleteClient(id);
-                    });
-                });
-                
-                document.querySelectorAll('[data-edit-client]').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const id = e.currentTarget.dataset.editClient;
-                        appState.editingClient = appState.clients.find(c => c.id === id);
-                        appState.isClientFormVisible = true;
-                        render();
-                        const form = document.getElementById('client-form');
-                        if (form && appState.editingClient) {
-                            form.querySelector('#client-name').value = appState.editingClient.name;
-                            form.querySelector('#client-contact').value = appState.editingClient.contact;
-                            form.querySelector('#client-value').value = appState.editingClient.totalValue;
-                        }
-                    });
-                });
             }
         }
+        
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+                appState.currentView = 'agenda';
+                if (!appState.isLoaded) {
+                    await fetchClients();
+                    await fetchAppointments();
+                    appState.isLoaded = true;
+                }
+            } else {
+                userId = null;
+                appState.currentView = 'auth';
+                appState.isLoaded = false;
+            }
+            render();
+        });
         
         document.addEventListener('DOMContentLoaded', () => {
             render();

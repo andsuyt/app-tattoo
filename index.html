@@ -16,14 +16,16 @@
         setLogLevel('Debug');
 
         // Variáveis globais
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // Verificação para garantir que o código funcione em qualquer lugar
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'demo-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         let app;
         let db;
         let auth;
         let userId;
+        let firebaseReady = false;
 
         const appState = {
             currentView: 'auth',
@@ -36,7 +38,6 @@
             editingAppointment: null,
             editingClient: null,
             isLoaded: false,
-            // Estado para a monetização
             appointmentsCount: 0,
             isPaid: false,
         };
@@ -49,19 +50,25 @@
             "Mão", "Pé", "Pescoço", "Outra"
         ];
         
-        // Inicializar Firebase
-        try {
-            app = initializeApp(firebaseConfig);
-            db = getFirestore(app);
-            auth = getAuth(app);
-            if (initialAuthToken) {
-                signInWithCustomToken(auth, initialAuthToken).catch(console.error);
-            } else {
-                signInAnonymously(auth).catch(console.error);
+        // Inicializar Firebase apenas se a configuração estiver disponível
+        if (firebaseConfig) {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                firebaseReady = true;
+                if (initialAuthToken) {
+                    signInWithCustomToken(auth, initialAuthToken).catch(console.error);
+                } else {
+                    signInAnonymously(auth).catch(console.error);
+                }
+            } catch (error) {
+                console.error("Erro ao inicializar o Firebase:", error);
             }
-        } catch (error) {
-            console.error("Erro ao inicializar o Firebase:", error);
+        } else {
+            console.warn("Firebase não inicializado. Rodando em modo de demonstração.");
         }
+
 
         // Funções utilitárias
         function showNotification(message, type = 'success') {
@@ -90,9 +97,23 @@
             });
         }
 
-        // Funções do Firebase
+        // Funções do Firebase (com verificação)
         async function fetchAppointments() {
-            if (!userId) { console.warn("ID do usuário não disponível. Pulando a busca."); return; }
+            if (!firebaseReady || !userId) { 
+                console.warn("Firebase não está pronto. Pulando a busca de agendamentos."); 
+                // Exemplo de dados para a demonstração
+                appState.appointments = [{
+                    id: 'demo-1',
+                    clientId: 'demo-1',
+                    date: dayjs().add(1, 'day').hour(10).minute(0).toISOString(),
+                    bodyPart: 'Braço (Antebraço)',
+                    depositPaid: true,
+                    referenceImage: 'https://placehold.co/100x100'
+                }];
+                appState.appointmentsCount = appState.appointments.length;
+                render();
+                return; 
+            }
             const q = collection(db, `artifacts/${appId}/users/${userId}/appointments`);
             onSnapshot(q, (snapshot) => {
                 const appointments = [];
@@ -104,7 +125,18 @@
         }
 
         async function fetchClients() {
-            if (!userId) { console.warn("ID do usuário não disponível. Pulando a busca."); return; }
+            if (!firebaseReady || !userId) { 
+                console.warn("Firebase não está pronto. Pulando a busca de clientes."); 
+                // Exemplo de dados para a demonstração
+                appState.clients = [{
+                    id: 'demo-1',
+                    name: 'João Demo',
+                    contact: 'joao.demo@email.com',
+                    totalValue: 'R$ 500'
+                }];
+                render();
+                return; 
+            }
             const q = collection(db, `artifacts/${appId}/users/${userId}/clients`);
             onSnapshot(q, (snapshot) => {
                 const clients = [];
@@ -115,7 +147,7 @@
         }
         
         async function fetchPaymentStatus() {
-            if (!userId) return;
+            if (!firebaseReady || !userId) return;
             const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/private/profile`);
             try {
                 const userDoc = await getDoc(userDocRef);
@@ -128,7 +160,7 @@
         }
 
         async function saveClient(clientData) {
-            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            if (!firebaseReady || !userId) return showNotification('Modo de demonstração: não é possível salvar dados.', 'error');
             try {
                 if (clientData.id) {
                     await updateDoc(doc(db, `artifacts/${appId}/users/${userId}/clients`, clientData.id), clientData);
@@ -144,9 +176,8 @@
         }
 
         async function saveAppointment(appointmentData) {
-            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            if (!firebaseReady || !userId) return showNotification('Modo de demonstração: não é possível salvar dados.', 'error');
 
-            // Lógica de bloqueio do plano gratuito
             if (!appState.isPaid && appState.appointmentsCount >= 10 && !appState.editingAppointment) {
                 appState.isAppointmentModalVisible = false;
                 showPaywall();
@@ -168,7 +199,7 @@
         }
 
         async function deleteAppointment(id) {
-            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            if (!firebaseReady || !userId) return showNotification('Modo de demonstração: não é possível excluir dados.', 'error');
             try {
                 await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/appointments`, id));
                 showNotification('Agendamento excluído com sucesso!');
@@ -179,7 +210,7 @@
         }
 
         async function deleteClient(id) {
-            if (!userId) return showNotification('Erro de autenticação.', 'error');
+            if (!firebaseReady || !userId) return showNotification('Modo de demonstração: não é possível excluir dados.', 'error');
             try {
                 const appointmentsQuery = query(collection(db, `artifacts/${appId}/users/${userId}/appointments`), where("clientId", "==", id));
                 const appointmentsSnapshot = await getDocs(appointmentsQuery);
@@ -207,7 +238,7 @@
                         <h1 class="text-2xl">Agenda de Tatuagem</h1>
                         <div class="flex items-center space-x-2">
                              <div class="text-xs bg-stone-700 rounded-full px-2 py-1 truncate max-w-[50%]">
-                                ${appState.isPaid ? 'Plano Vitalício' : `Grátis (${appState.appointmentsCount}/10)`}
+                                ${firebaseReady ? (appState.isPaid ? 'Plano Vitalício' : `Grátis (${appState.appointmentsCount}/10)`) : 'Modo de Demonstração'}
                              </div>
                              <button id="logout-btn" class="text-sm bg-red-600 rounded-full px-4 py-2 hover:bg-red-500 transition-colors">Sair</button>
                         </div>
@@ -469,6 +500,16 @@
                 if (authForm) {
                     authForm.addEventListener('submit', async (e) => {
                         e.preventDefault();
+                        if (!firebaseReady) {
+                             showNotification('Modo de demonstração: o login não funciona.', 'error');
+                             // Simula login de sucesso para mostrar a interface
+                             userId = 'demo-user-id';
+                             appState.currentView = 'agenda';
+                             fetchClients();
+                             fetchAppointments();
+                             render();
+                             return;
+                        }
                         const email = document.getElementById('auth-email').value;
                         const password = document.getElementById('auth-password').value;
                         try {
@@ -485,6 +526,9 @@
                     const signupBtn = document.getElementById('signup-btn');
                     if (signupBtn) {
                         signupBtn.addEventListener('click', async () => {
+                            if (!firebaseReady) {
+                                return showNotification('Modo de demonstração: a criação de conta não funciona.', 'error');
+                            }
                             const email = document.getElementById('auth-email').value;
                             const password = document.getElementById('auth-password').value;
                             if (password.length < 6) {
@@ -492,7 +536,6 @@
                             }
                             try {
                                 await createUserWithEmailAndPassword(auth, email, password);
-                                // Cria um documento de perfil para o novo usuário
                                 await setDoc(doc(db, `artifacts/${appId}/users/${auth.currentUser.uid}/private/profile`), { isPaid: false });
                                 showNotification('Conta criada com sucesso! Faça o login.');
                             } catch (error) {
@@ -507,7 +550,15 @@
                 }
             } else {
                 const logoutBtn = appContainer.querySelector('#logout-btn');
-                if (logoutBtn) logoutBtn.addEventListener('click', () => signOut(auth));
+                if (logoutBtn) logoutBtn.addEventListener('click', () => {
+                    if (firebaseReady) {
+                        signOut(auth);
+                    } else {
+                        userId = null;
+                        appState.currentView = 'auth';
+                        render();
+                    }
+                });
                 
                 const tabAgenda = appContainer.querySelector('#tab-agenda');
                 if (tabAgenda) tabAgenda.addEventListener('click', () => { appState.currentView = 'agenda'; render(); });
@@ -555,10 +606,10 @@
                     const closeAppointmentModal = document.getElementById('close-appointment-modal');
                     if (closeAppointmentModal) closeAppointmentModal.addEventListener('click', () => { appState.isAppointmentModalVisible = false; render(); });
                     
-                    document.querySelectorAll('[data-delete-appointment]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteAppointment(e.currentTarget.dataset.delete-appointment); }));
+                    document.querySelectorAll('[data-delete-appointment]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteAppointment(e.currentTarget.dataset.deleteAppointment); }));
                     document.querySelectorAll('[data-edit-appointment]').forEach(btn => {
                         btn.addEventListener('click', (e) => {
-                            appState.editingAppointment = appState.appointments.find(a => a.id === e.currentTarget.dataset.edit-appointment);
+                            appState.editingAppointment = appState.appointments.find(a => a.id === e.currentTarget.dataset.editAppointment);
                             appState.isAppointmentModalVisible = true;
                             render();
                             const form = document.getElementById('appointment-form');
@@ -596,10 +647,10 @@
                     const closeClientModal = document.getElementById('close-client-modal');
                     if (closeClientModal) closeClientModal.addEventListener('click', () => { appState.isClientFormVisible = false; render(); });
                     
-                    document.querySelectorAll('[data-delete-client]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteClient(e.currentTarget.dataset.delete-client); }));
+                    document.querySelectorAll('[data-delete-client]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteClient(e.currentTarget.dataset.deleteClient); }));
                     document.querySelectorAll('[data-edit-client]').forEach(btn => {
                         btn.addEventListener('click', (e) => {
-                            appState.editingClient = appState.clients.find(c => c.id === e.currentTarget.dataset.edit-client);
+                            appState.editingClient = appState.clients.find(c => c.id === e.currentTarget.dataset.editClient);
                             appState.isClientFormVisible = true;
                             render();
                             const form = document.getElementById('client-form');
@@ -614,23 +665,42 @@
             }
         }
         
-        onAuthStateChanged(auth, async (user) => {
-            if (user) {
-                userId = user.uid;
-                appState.currentView = 'agenda';
-                if (!appState.isLoaded) {
-                    await fetchPaymentStatus();
-                    await fetchClients();
-                    await fetchAppointments();
-                    appState.isLoaded = true;
+        if (firebaseReady) {
+             onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    appState.currentView = 'agenda';
+                    if (!appState.isLoaded) {
+                        await fetchPaymentStatus();
+                        await fetchClients();
+                        await fetchAppointments();
+                        appState.isLoaded = true;
+                    }
+                } else {
+                    userId = null;
+                    appState.currentView = 'auth';
+                    appState.isLoaded = false;
                 }
-            } else {
-                userId = null;
-                appState.currentView = 'auth';
-                appState.isLoaded = false;
-            }
-            render();
-        });
+                render();
+            });
+        } else {
+             onAuthStateChanged({onAuthStateChanged: (user) => {
+                if (user) {
+                    userId = user.uid;
+                    appState.currentView = 'agenda';
+                    if (!appState.isLoaded) {
+                        fetchClients();
+                        fetchAppointments();
+                        appState.isLoaded = true;
+                    }
+                } else {
+                    userId = null;
+                    appState.currentView = 'auth';
+                    appState.isLoaded = false;
+                }
+                render();
+            }});
+        }
         
         document.addEventListener('DOMContentLoaded', () => {
             render();

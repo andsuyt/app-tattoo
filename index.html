@@ -35,7 +35,10 @@
             isAppointmentModalVisible: false,
             editingAppointment: null,
             editingClient: null,
-            isLoaded: false
+            isLoaded: false,
+            // Estado para a monetização
+            appointmentsCount: 0,
+            isPaid: false,
         };
 
         dayjs.locale('pt-br');
@@ -95,6 +98,7 @@
                 const appointments = [];
                 snapshot.forEach(doc => appointments.push({ id: doc.id, ...doc.data() }));
                 appState.appointments = appointments;
+                appState.appointmentsCount = appointments.length;
                 render();
             });
         }
@@ -108,6 +112,19 @@
                 appState.clients = clients;
                 render();
             });
+        }
+        
+        async function fetchPaymentStatus() {
+            if (!userId) return;
+            const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/private/profile`);
+            try {
+                const userDoc = await getDoc(userDocRef);
+                if (userDoc.exists()) {
+                    appState.isPaid = userDoc.data().isPaid || false;
+                }
+            } catch (e) {
+                console.error("Erro ao buscar status de pagamento: ", e);
+            }
         }
 
         async function saveClient(clientData) {
@@ -128,6 +145,14 @@
 
         async function saveAppointment(appointmentData) {
             if (!userId) return showNotification('Erro de autenticação.', 'error');
+
+            // Lógica de bloqueio do plano gratuito
+            if (!appState.isPaid && appState.appointmentsCount >= 10 && !appState.editingAppointment) {
+                appState.isAppointmentModalVisible = false;
+                showPaywall();
+                return;
+            }
+
             try {
                 if (appointmentData.id) {
                     await updateDoc(doc(db, `artifacts/${appId}/users/${userId}/appointments`, appointmentData.id), appointmentData);
@@ -177,16 +202,23 @@
             if (appState.currentView === 'auth') {
                 appContainer.innerHTML = renderAuthView();
             } else {
-                appContainer.innerHTML = `
+                const header = `
                     <div class="fixed top-0 left-0 w-full bg-stone-900 shadow-lg p-4 z-20 flex justify-between items-center text-white font-serif">
                         <h1 class="text-2xl">Agenda de Tatuagem</h1>
                         <div class="flex items-center space-x-2">
+                             <div class="text-xs bg-stone-700 rounded-full px-2 py-1 truncate max-w-[50%]">
+                                ${appState.isPaid ? 'Plano Vitalício' : `Grátis (${appState.appointmentsCount}/10)`}
+                             </div>
                              <button id="logout-btn" class="text-sm bg-red-600 rounded-full px-4 py-2 hover:bg-red-500 transition-colors">Sair</button>
                         </div>
                     </div>
+                `;
+                const mainContent = `
                     <div class="pt-20 pb-20 p-4 min-h-screen bg-stone-900 text-gray-300 font-sans">
                         ${appState.currentView === 'agenda' ? renderAgendaView() : renderClientsView()}
                     </div>
+                `;
+                const footer = `
                     <div class="fixed bottom-0 left-0 w-full bg-stone-900 shadow-lg p-4 z-20 font-serif">
                         <div class="flex justify-around">
                             <button id="tab-agenda" class="p-4 rounded-xl flex-1 mx-2 ${appState.currentView === 'agenda' ? 'bg-stone-700 text-amber-500' : 'text-gray-400 hover:bg-stone-800'} transition-colors">
@@ -198,9 +230,27 @@
                         </div>
                     </div>
                 `;
+                appContainer.innerHTML = header + mainContent + footer;
             }
 
             attachEventListeners();
+        }
+
+        function showPaywall() {
+            const modal = document.createElement('div');
+            modal.id = 'paywall-modal';
+            modal.className = "fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4 transition-opacity duration-300 opacity-100";
+            modal.innerHTML = `
+                <div class="bg-stone-800 p-6 rounded-xl shadow-2xl w-full max-w-sm text-center font-sans text-gray-300">
+                    <h2 class="text-2xl font-serif text-white mb-4">Limite Gratuito Atingido</h2>
+                    <p class="mb-4">Para continuar usando a agenda e ter acesso ilimitado, faça um pagamento único de R$ 99,90 via PIX.</p>
+                    <a href="https://nubank.com.br" target="_blank" class="w-full inline-block p-4 rounded-lg bg-amber-500 text-stone-900 font-bold hover:bg-amber-400 transition-colors">
+                        Pagar com PIX
+                    </a>
+                    <p class="mt-4 text-sm text-gray-400">Após o pagamento, sua agenda será liberada em até 24 horas.</p>
+                </div>
+            `;
+            document.body.appendChild(modal);
         }
 
         function renderAuthView() {
@@ -442,6 +492,8 @@
                             }
                             try {
                                 await createUserWithEmailAndPassword(auth, email, password);
+                                // Cria um documento de perfil para o novo usuário
+                                await setDoc(doc(db, `artifacts/${appId}/users/${auth.currentUser.uid}/private/profile`), { isPaid: false });
                                 showNotification('Conta criada com sucesso! Faça o login.');
                             } catch (error) {
                                 if (error.code === 'auth/email-already-in-use') {
@@ -503,10 +555,10 @@
                     const closeAppointmentModal = document.getElementById('close-appointment-modal');
                     if (closeAppointmentModal) closeAppointmentModal.addEventListener('click', () => { appState.isAppointmentModalVisible = false; render(); });
                     
-                    document.querySelectorAll('[data-delete-appointment]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteAppointment(e.currentTarget.dataset.deleteAppointment); }));
+                    document.querySelectorAll('[data-delete-appointment]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteAppointment(e.currentTarget.dataset.delete-appointment); }));
                     document.querySelectorAll('[data-edit-appointment]').forEach(btn => {
                         btn.addEventListener('click', (e) => {
-                            appState.editingAppointment = appState.appointments.find(a => a.id === e.currentTarget.dataset.editAppointment);
+                            appState.editingAppointment = appState.appointments.find(a => a.id === e.currentTarget.dataset.edit-appointment);
                             appState.isAppointmentModalVisible = true;
                             render();
                             const form = document.getElementById('appointment-form');
@@ -544,10 +596,10 @@
                     const closeClientModal = document.getElementById('close-client-modal');
                     if (closeClientModal) closeClientModal.addEventListener('click', () => { appState.isClientFormVisible = false; render(); });
                     
-                    document.querySelectorAll('[data-delete-client]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteClient(e.currentTarget.dataset.deleteClient); }));
+                    document.querySelectorAll('[data-delete-client]').forEach(btn => btn.addEventListener('click', (e) => { if (confirm('Tem certeza?')) deleteClient(e.currentTarget.dataset.delete-client); }));
                     document.querySelectorAll('[data-edit-client]').forEach(btn => {
                         btn.addEventListener('click', (e) => {
-                            appState.editingClient = appState.clients.find(c => c.id === e.currentTarget.dataset.editClient);
+                            appState.editingClient = appState.clients.find(c => c.id === e.currentTarget.dataset.edit-client);
                             appState.isClientFormVisible = true;
                             render();
                             const form = document.getElementById('client-form');
@@ -567,6 +619,7 @@
                 userId = user.uid;
                 appState.currentView = 'agenda';
                 if (!appState.isLoaded) {
+                    await fetchPaymentStatus();
                     await fetchClients();
                     await fetchAppointments();
                     appState.isLoaded = true;
